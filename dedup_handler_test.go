@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mudler/xlog"
+	"github.com/l0caldadmin/xlog"
 )
 
 // captureHandler records all log records passed to it.

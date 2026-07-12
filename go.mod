@@ -1,4 +1,4 @@
-module github.com/mudler/xlog
+module github.com/l0caldadmin/xlog
 
 go 1.26.5
 
