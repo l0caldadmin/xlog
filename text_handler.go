@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,9 +21,100 @@ const (
 	colorCyan   = "\033[36m"
 )
 
+// stripANSI removes ANSI/VT100 escape sequences from s using a byte-scanning
+// state machine (CWE-116). No regex is used; the logic is fully enumerable:
+//
+//	CSI  ESC '['  — consume until a final byte in [0x40, 0x7E].
+//	OSC  ESC ']'  — consume until BEL (0x07) or ST (ESC '\').
+//	Malformed     — remove only ESC and keep following bytes as plain text.
+func stripANSI(s string) string {
+	if !strings.ContainsRune(s, '\x1b') {
+		return s // fast path — nothing to strip
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] != '\x1b' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		// ESC found. Try to consume a complete known sequence.
+		if i+1 >= len(s) {
+			break // trailing ESC only
+		}
+
+		next := s[i+1]
+		swallowed := false
+
+		switch next {
+		case '[': // CSI: params/intermediates [0x20,0x3F]* then final [0x40,0x7E]
+			j := i + 2
+			for j < len(s) {
+				c := s[j]
+				if c >= 0x40 && c <= 0x7e {
+					i = j + 1
+					swallowed = true
+					break
+				}
+				if c < 0x20 || c > 0x3f {
+					// Malformed CSI: ESC '[' and consumed parameter bytes were already
+					// interpreted as control sequence bytes. Preserve only the first
+					// non-CSI byte and onward.
+					i = j
+					swallowed = true
+					break
+				}
+				j++
+			}
+			if !swallowed && j >= len(s) {
+				// Truncated CSI at end: consume sequence bytes through end.
+				i = j
+				swallowed = true
+			}
+		case ']': // OSC: terminated by BEL or ST (ESC '\\')
+			j := i + 2
+			for j < len(s) {
+				if s[j] == '\x07' {
+					i = j + 1
+					swallowed = true
+					break
+				}
+				if s[j] == '\x1b' {
+					if j+1 < len(s) && s[j+1] == '\\' {
+						i = j + 2
+						swallowed = true
+					}
+					break // malformed ESC-in-OSC or ST handled above
+				}
+				j++
+			}
+		}
+
+		if swallowed {
+			continue
+		}
+
+		// Malformed/unknown sequence: drop only ESC, keep following bytes.
+		i++
+	}
+	return b.String()
+}
+
+// sanitize strips ANSI escape sequences and escapes embedded newlines/carriage
+// returns from user-supplied strings, preventing terminal log injection (CWE-116, CWE-117).
+func sanitize(s string) string {
+	s = stripANSI(s)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	return s
+}
+
 type colorTextHandler struct {
 	opts   slog.HandlerOptions
 	w      io.Writer
+	mu     *sync.Mutex
 	attrs  []slog.Attr
 	groups []string
 }
@@ -34,6 +126,7 @@ func newColorTextHandler(w io.Writer, opts *slog.HandlerOptions) *colorTextHandl
 	return &colorTextHandler{
 		opts:   *opts,
 		w:      w,
+		mu:     &sync.Mutex{},
 		attrs:  []slog.Attr{},
 		groups: []string{},
 	}
@@ -62,8 +155,8 @@ func (h *colorTextHandler) Handle(ctx context.Context, r slog.Record) error {
 	buf.WriteString(levelStr)
 	buf.WriteString(" ")
 
-	// Format message
-	buf.WriteString(r.Message)
+	// Format message — sanitize to prevent terminal log injection (CWE-116, CWE-117).
+	buf.WriteString(sanitize(r.Message))
 
 	// Format source location if available
 	if r.PC != 0 && h.opts.AddSource {
@@ -95,6 +188,8 @@ func (h *colorTextHandler) Handle(ctx context.Context, r slog.Record) error {
 	})
 
 	buf.WriteString("\n")
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	_, err := h.w.Write([]byte(buf.String()))
 	return err
 }
@@ -119,10 +214,18 @@ func (h *colorTextHandler) formatLevel(level slog.Level) string {
 }
 
 func (h *colorTextHandler) formatAttr(buf *strings.Builder, attr slog.Attr, groups []string) {
+	if h.opts.ReplaceAttr != nil {
+		attr = h.opts.ReplaceAttr(groups, attr)
+		if attr.Key == "" {
+			return
+		}
+	}
+
 	key := attr.Key
 	if len(groups) > 0 {
 		key = strings.Join(groups, ".") + "." + key
 	}
+	key = sanitize(key)
 
 	buf.WriteString(colorCyan)
 	buf.WriteString(key)
@@ -142,7 +245,7 @@ func (h *colorTextHandler) formatAttr(buf *strings.Builder, attr slog.Attr, grou
 		}
 		buf.WriteString("}")
 	} else {
-		buf.WriteString(h.formatValue(value))
+		buf.WriteString(sanitize(h.formatValue(value)))
 	}
 	buf.WriteString(" ")
 }
@@ -174,6 +277,7 @@ func (h *colorTextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &colorTextHandler{
 		opts:   h.opts,
 		w:      h.w,
+		mu:     h.mu,
 		attrs:  append(h.attrs, attrs...),
 		groups: h.groups,
 	}
@@ -183,6 +287,7 @@ func (h *colorTextHandler) WithGroup(name string) slog.Handler {
 	return &colorTextHandler{
 		opts:   h.opts,
 		w:      h.w,
+		mu:     h.mu,
 		attrs:  h.attrs,
 		groups: append(h.groups, name),
 	}
