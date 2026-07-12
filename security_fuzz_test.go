@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mudler/xlog"
+	"github.com/l0caldadmin/xlog"
 )
 
 // FuzzLogging_EncodingAndControlChars exercises encoding/control-char edge cases

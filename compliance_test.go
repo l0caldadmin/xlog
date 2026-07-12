@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mudler/xlog"
+	"github.com/l0caldadmin/xlog"
 )
 
 type failWriter struct {

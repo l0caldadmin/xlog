@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mudler/xlog"
+	"github.com/l0caldadmin/xlog"
 )
 
 // ansiStringer implements fmt.Stringer and returns an ANSI-laden string.
